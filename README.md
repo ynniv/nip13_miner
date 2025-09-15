@@ -23,7 +23,7 @@ A high-performance **NIP-13 Proof of Work miner** that leverages **optimized SHA
 # Build both versions (single-threaded + parallel)
 make all
 
-# Build only parallel version  
+# Build only parallel version
 make nip13_parallel
 
 # Build only single-threaded version
@@ -65,7 +65,7 @@ make test-parallel
 
 ### Single-Threaded Benchmarks
 **Apple M1 (single-threaded):**
-- **Difficulty 8**: ~0.7 MH/s (found in milliseconds)  
+- **Difficulty 8**: ~0.7 MH/s (found in milliseconds)
 - **Difficulty 16**: ~1.1 MH/s (found in ~70ms)
 - **Difficulty 20**: ~1-2 MH/s (typically 10-60 seconds)
 
@@ -80,7 +80,7 @@ Improvement:     4.0x MH/s,  3.2x solutions/sec
 **Threading Performance:**
 - **1 thread**: 0.68 MH/s baseline
 - **4 threads**: 2.14 MH/s (3.1x improvement)
-- **8 threads**: 2.83 MH/s (4.2x improvement)  
+- **8 threads**: 2.83 MH/s (4.2x improvement)
 - **14 threads**: 2.76 MH/s (4.0x improvement)
 
 Performance scales well with CPU optimization flags (`-march=native -mtune=native`) and available cores.
@@ -192,13 +192,13 @@ The parallel miner automatically increments the event timestamp for each solutio
 # High difficulty
 ./nip13_miner event.json 24 500
 
-# Quick test  
+# Quick test
 ./nip13_miner event.json 8 5
 ```
 
 **Benchmark mode provides:**
 - Solutions per second measurement
-- Hash rate in MH/s  
+- Hash rate in MH/s
 - Real-time performance tracking
 - Average attempts per solution
 - Total time and attempt statistics
@@ -250,7 +250,7 @@ make benchmark-parallel
 ```bash
 # Test different thread counts
 ./nip13_parallel event.json 16 benchmark 5 1   # 1 thread
-./nip13_parallel event.json 16 benchmark 5 4   # 4 threads  
+./nip13_parallel event.json 16 benchmark 5 4   # 4 threads
 ./nip13_parallel event.json 16 benchmark 5 8   # 8 threads
 ./nip13_parallel event.json 16 benchmark 5     # All cores
 
@@ -275,7 +275,7 @@ The miner uses several optimizations from hashcat:
 
 **Expected Performance:**
 - **Low-end CPU**: 0.5-1.0 MH/s
-- **Mid-range CPU**: 1.0-2.0 MH/s  
+- **Mid-range CPU**: 1.0-2.0 MH/s
 - **High-end CPU**: 2.0-5.0 MH/s
 
 ## 🔬 Implementation Details
@@ -307,7 +307,7 @@ The parallel implementation uses a simple but effective approach:
 #### Threading Pattern
 ```
 Thread 0: searches nonces 0 to N/cores
-Thread 1: searches nonces N/cores to 2*N/cores  
+Thread 1: searches nonces N/cores to 2*N/cores
 Thread 2: searches nonces 2*N/cores to 3*N/cores
 ...
 Thread n: searches remaining nonces
@@ -328,6 +328,14 @@ char* increment_timestamp_in_json(const char* json_str, int increment_seconds)
 ```
 
 This ensures each solution search uses a unique event hash, preventing skewed results from finding identical solutions repeatedly.
+
+## Reality
+
+But you're really here for:
+
+```
+export GEO=9q; echo '{"content":"pow pow powerbot, pow pow powerbot, powerbot! pow 21!"}' | nak event -k 20000 --tag g=$GEO --tag n=powbot | ./nip13_miner 21 | nak event $(./geohash_relay_finder -q $GEO relays.csv)
+```
 
 ## 🤝 Contributing
 
