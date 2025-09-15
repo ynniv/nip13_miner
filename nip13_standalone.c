@@ -201,6 +201,83 @@ uint64_t get_time_us() {
     return tv.tv_sec * 1000000ULL + tv.tv_usec;
 }
 
+// Extract field value from JSON
+char* extract_json_field(const char* json, const char* field) {
+    char* field_pattern = malloc(strlen(field) + 10);
+    sprintf(field_pattern, "\"%s\":", field);
+
+    char* field_pos = strstr(json, field_pattern);
+    if (!field_pos) {
+        free(field_pattern);
+        return NULL;
+    }
+
+    char* value_start = strchr(field_pos, ':') + 1;
+    while (*value_start == ' ' || *value_start == '\t') value_start++;
+
+    char* value_end;
+    int len;
+
+    if (*value_start == '"') {
+        // String value
+        value_start++; // Skip opening quote
+        value_end = strchr(value_start, '"');
+        len = value_end - value_start;
+    } else if (*value_start == '[') {
+        // Array value - find matching bracket
+        int bracket_count = 0;
+        value_end = value_start;
+        do {
+            if (*value_end == '[') bracket_count++;
+            if (*value_end == ']') bracket_count--;
+            value_end++;
+        } while (bracket_count > 0 && *value_end);
+        len = value_end - value_start;
+    } else {
+        // Number value
+        value_end = value_start;
+        while (*value_end && *value_end != ',' && *value_end != '}' && *value_end != ']') {
+            value_end++;
+        }
+        len = value_end - value_start;
+    }
+
+    char* result = malloc(len + 1);
+    strncpy(result, value_start, len);
+    result[len] = '\0';
+
+    free(field_pattern);
+    return result;
+}
+
+// Calculate Nostr event ID using canonical representation
+void calculate_nostr_event_id(const char* json, uint8_t* id_hash) {
+    // Extract fields for canonical representation
+    char* pubkey = extract_json_field(json, "pubkey");
+    char* created_at = extract_json_field(json, "created_at");
+    char* kind = extract_json_field(json, "kind");
+    char* tags = extract_json_field(json, "tags");
+    char* content = extract_json_field(json, "content");
+
+    // Build canonical array: [0, pubkey, created_at, kind, tags, content]
+    char* canonical = malloc(strlen(pubkey) + strlen(created_at) + strlen(kind) +
+                            strlen(tags) + strlen(content) + 100);
+
+    sprintf(canonical, "[0,\"%s\",%s,%s,%s,\"%s\"]",
+            pubkey, created_at, kind, tags, content);
+
+    // Calculate SHA256 hash
+    sha256_hash((uint8_t*)canonical, strlen(canonical), id_hash);
+
+    // Cleanup
+    free(pubkey);
+    free(created_at);
+    free(kind);
+    free(tags);
+    free(content);
+    free(canonical);
+}
+
 // Simple JSON manipulation (find and replace nonce)
 char* update_nonce_in_json(const char* json, uint64_t nonce) {
     // Find existing nonce or create new one
@@ -262,6 +339,70 @@ char* update_nonce_in_json(const char* json, uint64_t nonce) {
     return result;
 }
 
+// Set the event ID and clear signature
+char* set_event_id_and_clear_sig(const char* json, const char* id_hex) {
+    char* temp_result = malloc(strlen(json) + 100);
+
+    // First, set the event ID
+    char* id_pos = strstr(json, "\"id\":");
+    if (id_pos) {
+        // Find the value after "id":
+        char* value_start = strchr(id_pos, ':');
+        if (value_start) {
+            value_start++;
+            while (*value_start == ' ' || *value_start == '\t') value_start++;
+
+            char* value_end = value_start;
+            if (*value_start == '"') {
+                value_end = strchr(value_start + 1, '"') + 1;
+            } else {
+                while (*value_end && *value_end != ',' && *value_end != ']' && *value_end != '}') {
+                    value_end++;
+                }
+            }
+
+            // Replace the id value
+            strncpy(temp_result, json, value_start - json);
+            temp_result[value_start - json] = '\0';
+            strcat(temp_result, "\"");
+            strcat(temp_result, id_hex);
+            strcat(temp_result, "\"");
+            strcat(temp_result, value_end);
+        }
+    } else {
+        // If no id field found, just copy the original
+        strcpy(temp_result, json);
+    }
+
+    // Now clear the signature
+    char* result = malloc(strlen(temp_result) + 100);
+    char* sig_pos = strstr(temp_result, "\"sig\":");
+    if (sig_pos) {
+        // Find the value after "sig":
+        char* value_start = strchr(sig_pos, ':');
+        if (value_start) {
+            value_start++;
+            while (*value_start == ' ' || *value_start == '\t') value_start++;
+
+            char* value_end = value_start;
+            if (*value_start == '"') {
+                value_end = strchr(value_start + 1, '"') + 1;
+            }
+
+            // Replace with empty signature
+            strncpy(result, temp_result, value_start - temp_result);
+            result[value_start - temp_result] = '\0';
+            strcat(result, "\"\"");
+            strcat(result, value_end);
+        }
+    } else {
+        strcpy(result, temp_result);
+    }
+
+    free(temp_result);
+    return result;
+}
+
 // NIP-13 Proof of Work miner with range support
 int nip13_mine_range(const char* event_json, int difficulty, uint64_t start_nonce,
                     uint64_t end_nonce, uint64_t* found_nonce, uint64_t* attempts) {
@@ -273,8 +414,8 @@ int nip13_mine_range(const char* event_json, int difficulty, uint64_t start_nonc
         // Update nonce in JSON
         char* event_with_nonce = update_nonce_in_json(event_json, nonce);
 
-        // Hash the event
-        sha256_hash((uint8_t*)event_with_nonce, strlen(event_with_nonce), hash);
+        // Calculate the Nostr event ID (canonical representation hash)
+        calculate_nostr_event_id(event_with_nonce, hash);
         (*attempts)++;
 
         // Check if we found a valid proof
@@ -292,10 +433,12 @@ int nip13_mine_range(const char* event_json, int difficulty, uint64_t start_nonc
     return 0; // Not found in range
 }
 
-// NIP-13 Proof of Work miner
-int nip13_mine(const char* event_json, int difficulty, uint64_t max_iterations, uint64_t* found_nonce) {
-    printf("🔨 Starting NIP-13 mining (difficulty: %d bits)\n", difficulty);
-    printf("📝 Event: %.60s%s\n", event_json, strlen(event_json) > 60 ? "..." : "");
+// NIP-13 Proof of Work miner with hash output
+int nip13_mine_with_hash(const char* event_json, int difficulty, uint64_t max_iterations, uint64_t* found_nonce, uint8_t* final_hash, int quiet) {
+    if (!quiet) {
+        fprintf(stderr, "🔨 Starting NIP-13 mining (difficulty: %d bits)\n", difficulty);
+        fprintf(stderr, "📝 Event: %.60s%s\n", event_json, strlen(event_json) > 60 ? "..." : "");
+    }
 
     uint64_t nonce = 0;
     uint64_t start_time = get_time_us();
@@ -307,23 +450,26 @@ int nip13_mine(const char* event_json, int difficulty, uint64_t max_iterations, 
         // Update nonce in JSON
         char* event_with_nonce = update_nonce_in_json(event_json, nonce);
 
-        // Hash the event
-        sha256_hash((uint8_t*)event_with_nonce, strlen(event_with_nonce), hash);
+        // Calculate the Nostr event ID (canonical representation hash)
+        calculate_nostr_event_id(event_with_nonce, hash);
 
         // Check if we found a valid proof
         int leading_zeros = count_leading_zeros(hash);
         if (leading_zeros >= difficulty) {
-            hash_to_hex(hash, hash_hex);
-            printf("✅ Found valid proof!\n");
-            printf("🎯 Nonce: %llu\n", (unsigned long long)nonce);
-            printf("🔒 Hash:  %s\n", hash_hex);
-            printf("⚡ Leading zeros: %d\n", leading_zeros);
+            if (!quiet) {
+                hash_to_hex(hash, hash_hex);
+                fprintf(stderr, "✅ Found valid proof!\n");
+                fprintf(stderr, "🎯 Nonce: %llu\n", (unsigned long long)nonce);
+                fprintf(stderr, "🔒 Hash:  %s\n", hash_hex);
+                fprintf(stderr, "⚡ Leading zeros: %d\n", leading_zeros);
 
-            uint64_t elapsed = get_time_us() - start_time;
-            printf("⏱️  Time: %.2f seconds\n", elapsed / 1000000.0);
-            printf("🚀 Rate: %.2f MH/s\n", (nonce / 1000000.0) / (elapsed / 1000000.0));
+                uint64_t elapsed = get_time_us() - start_time;
+                fprintf(stderr, "⏱️  Time: %.2f seconds\n", elapsed / 1000000.0);
+                fprintf(stderr, "🚀 Rate: %.2f MH/s\n", (nonce / 1000000.0) / (elapsed / 1000000.0));
+            }
 
             *found_nonce = nonce;
+            memcpy(final_hash, hash, SHA256_DIGEST_SIZE);
             free(event_with_nonce);
             return 1;
         }
@@ -332,17 +478,25 @@ int nip13_mine(const char* event_json, int difficulty, uint64_t max_iterations, 
         nonce++;
 
         // Progress report every 1M iterations
-        if (nonce % 1000000 == 0) {
+        if (!quiet && nonce % 1000000 == 0) {
             uint64_t now = get_time_us();
             double rate = 1000000.0 / ((now - last_report) / 1000000.0);
-            printf("⚡ %llu M attempts, %.2f MH/s, best: %d zeros\n",
+            fprintf(stderr, "⚡ %llu M attempts, %.2f MH/s, best: %d zeros\n",
                    (unsigned long long)(nonce / 1000000), rate / 1000000.0, leading_zeros);
             last_report = now;
         }
     }
 
-    printf("❌ No valid proof found after %llu attempts\n", (unsigned long long)max_iterations);
+    if (!quiet) {
+        fprintf(stderr, "❌ No valid proof found after %llu attempts\n", (unsigned long long)max_iterations);
+    }
     return 0;
+}
+
+// NIP-13 Proof of Work miner
+int nip13_mine(const char* event_json, int difficulty, uint64_t max_iterations, uint64_t* found_nonce, int quiet) {
+    uint8_t hash[SHA256_DIGEST_SIZE];
+    return nip13_mine_with_hash(event_json, difficulty, max_iterations, found_nonce, hash, quiet);
 }
 
 
@@ -401,33 +555,33 @@ int benchmark_mode(char* event_json, int difficulty, int target_solutions) {
 
 // Main function
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        printf("Usage: %s <event.json> [difficulty] [max_attempts|benchmark]\n", argv[0]);
-        printf("  event.json   - Nostr event JSON file\n");
+    // Show usage if help is requested
+    if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+        printf("Usage: %s [difficulty] [max_attempts|benchmark]\n", argv[0]);
+        printf("  Reads Nostr event JSON from stdin\n");
         printf("  difficulty   - Target difficulty in bits (default: 16)\n");
         printf("  max_attempts - Maximum attempts in millions (default: 100)\n");
         printf("  benchmark N  - Benchmark mode: find N solutions and measure solutions/sec\n\n");
         printf("Examples:\n");
-        printf("  %s event.json 20 50          # Mine once, max 50M attempts\n", argv[0]);
-        printf("  %s event.json 16 benchmark 5 # Find 5 solutions, measure solutions/sec\n", argv[0]);
-        return 1;
+        printf("  cat event.json | %s 20 50          # Mine once, max 50M attempts\n", argv[0]);
+        printf("  echo '{...}' | %s 16 benchmark 5   # Find 5 solutions, measure solutions/sec\n", argv[0]);
+        return 0;
     }
 
     // Parse arguments
-    char* json_file = argv[1];
-    int difficulty = (argc > 2) ? atoi(argv[2]) : 16;
+    int difficulty = (argc > 1) ? atoi(argv[1]) : 16;
 
     // Check for benchmark mode
     int is_benchmark_mode = 0;
     int target_solutions = 0;
     uint64_t max_attempts = 100000000ULL; // default 100M
 
-    if (argc > 3) {
-        if (strcmp(argv[3], "benchmark") == 0) {
+    if (argc > 2) {
+        if (strcmp(argv[2], "benchmark") == 0) {
             is_benchmark_mode = 1;
-            target_solutions = (argc > 4) ? atoi(argv[4]) : 5;
+            target_solutions = (argc > 3) ? atoi(argv[3]) : 5;
         } else {
-            max_attempts = atoll(argv[3]) * 1000000ULL;
+            max_attempts = atoll(argv[2]) * 1000000ULL;
         }
     }
 
@@ -442,25 +596,35 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Read event JSON
-    FILE* fp = fopen(json_file, "r");
-    if (!fp) {
-        printf("❌ Error: Cannot open file %s\n", json_file);
+    // Read event JSON from stdin
+    char* event_json = NULL;
+    size_t json_size = 0;
+    size_t json_capacity = 4096;
+    event_json = malloc(json_capacity);
+    if (!event_json) {
+        printf("❌ Error: Cannot allocate memory for JSON\n");
         return 1;
     }
 
-    fseek(fp, 0, SEEK_END);
-    long file_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-
-    char* event_json = malloc(file_size + 1);
-    fread(event_json, 1, file_size, fp);
-    event_json[file_size] = '\0';
-    fclose(fp);
+    int c;
+    while ((c = getchar()) != EOF) {
+        if (json_size >= json_capacity - 1) {
+            json_capacity *= 2;
+            char* new_json = realloc(event_json, json_capacity);
+            if (!new_json) {
+                printf("❌ Error: Cannot reallocate memory for JSON\n");
+                free(event_json);
+                return 1;
+            }
+            event_json = new_json;
+        }
+        event_json[json_size++] = c;
+    }
+    event_json[json_size] = '\0';
 
     // Remove any trailing whitespace
-    while (file_size > 0 && (event_json[file_size-1] == '\n' || event_json[file_size-1] == ' ')) {
-        event_json[--file_size] = '\0';
+    while (json_size > 0 && (event_json[json_size-1] == '\n' || event_json[json_size-1] == ' ')) {
+        event_json[--json_size] = '\0';
     }
 
     if (is_benchmark_mode) {
@@ -469,31 +633,27 @@ int main(int argc, char* argv[]) {
         free(event_json);
         return (solutions_found == target_solutions) ? 0 : 1;
     } else {
-        printf("🔢 Max attempts: %.0f million\n", max_attempts / 1000000.0);
-        printf("\n");
-
         // Start regular mining
         uint64_t found_nonce;
-        if (nip13_mine(event_json, difficulty, max_attempts, &found_nonce)) {
-            // Output the final event with nonce
-            char* final_event = update_nonce_in_json(event_json, found_nonce);
-            printf("📄 Final event:\n%s\n", final_event);
+        uint8_t final_hash[SHA256_DIGEST_SIZE];
+        if (nip13_mine_with_hash(event_json, difficulty, max_attempts, &found_nonce, final_hash, 1)) {
+            // First add the nonce to the event
+            char* event_with_nonce = update_nonce_in_json(event_json, found_nonce);
 
-            // Save to output file
-            char output_file[256];
-            sprintf(output_file, "mined_%s", json_file);
-            FILE* out = fopen(output_file, "w");
-            if (out) {
-                fprintf(out, "%s\n", final_event);
-                fclose(out);
-                printf("💾 Saved to: %s\n", output_file);
-            }
+            // Convert the mining hash to hex - this is the event ID
+            char id_hex[65];
+            hash_to_hex(final_hash, id_hex);
+
+            // Set the event ID and clear signature
+            char* final_event = set_event_id_and_clear_sig(event_with_nonce, id_hex);
+            printf("%s\n", final_event);
+
+            free(event_with_nonce);
 
             free(final_event);
             free(event_json);
             return 0;
         } else {
-            printf("\n💔 Mining failed - try lower difficulty or more attempts\n");
             free(event_json);
             return 1;
         }
